@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "hudi": {
+      "transport": "streamable-http",
+      "url": "https://hudi-mcp.internal.example.com/mcp"
+    }
+  }
+}

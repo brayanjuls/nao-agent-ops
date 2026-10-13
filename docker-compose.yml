@@ -1,0 +1,149 @@
+# Local test stack: nao + hudi-mcp + RustFS (S3-compatible storage) seeded with Hudi, Delta, Parquet, CSV and
+# JSON tables. See dev/README.md.
+#
+#   cp dev/.env.example .env      # then add an LLM key (Anthropic, OpenAI or Bedrock) and, optionally, AWS S3 credentials
+#   docker compose up -d --build
+#
+#   nao              http://localhost:5005   (sign up: the first account becomes admin)
+#   RustFS console   http://localhost:9001/rustfs/console/   (rustfsadmin / rustfsadmin)
+#   hudi-mcp         http://localhost:8000/mcp
+
+name: s3-query-mcp-dev
+
+x-rustfs-credentials: &rustfs-credentials
+  RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+  RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+
+services:
+  # ---------- object storage ----------
+  rustfs-permissions:  # RustFS runs as UID 10001 and needs to own its data volume
+    image: docker.io/library/alpine:3
+    command: ["sh", "-c", "chown -R 10001:10001 /data"]
+    volumes:
+      - rustfs-data:/data
+
+  rustfs:
+    image: docker.io/rustfs/rustfs:latest
+    depends_on:
+      rustfs-permissions:
+        condition: service_completed_successfully
+    environment:
+      <<: *rustfs-credentials
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # web console
+    volumes:
+      - rustfs-data:/data
+    restart: unless-stopped
+
+  seed:  # one-shot: creates s3://lake and uploads the sample tables (skipped once seeded)
+    build: ./dev/seed
+    depends_on:
+      - rustfs
+    environment:
+      S3_ENDPOINT: http://rustfs:9000
+      S3_BUCKET: lake
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:-rustfsadmin}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:-rustfsadmin}
+      AWS_REGION: us-east-1
+      SEED_FORCE: ${SEED_FORCE:-0}
+    restart: "no"
+
+  # ---------- the MCP server ----------
+  hudi-mcp:
+    build:
+      context: .
+      target: server
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      <<: *rustfs-credentials
+      HUDI_MCP_CONFIG: /config/config.yaml
+      # AWS S3 credentials for tables outside RustFS (see dev/hudi-mcp.yaml). Deliberately not AWS_*: the
+      # config file decides which tables use them.
+      LAKE_AWS_REGION: ${LAKE_AWS_REGION:-us-east-1}
+      LAKE_AWS_ACCESS_KEY_ID: ${LAKE_AWS_ACCESS_KEY_ID:-}
+      LAKE_AWS_SECRET_ACCESS_KEY: ${LAKE_AWS_SECRET_ACCESS_KEY:-}
+      LAKE_AWS_SESSION_TOKEN: ${LAKE_AWS_SESSION_TOKEN:-}
+    volumes:
+      - ./dev/hudi-mcp.yaml:/config/config.yaml:ro
+    ports:
+      - "8000:8000"
+    healthcheck:  # the port only opens once uvicorn has started the MCP app
+      test: ["CMD-SHELL", "python -c \"import socket; socket.create_connection(('127.0.0.1', 8000), 3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # ---------- nao ----------
+  nao-project:  # one-shot: copies dev/nao-project + the repo's skill into a volume the nao user can write to
+    image: docker.io/getnao/nao:latest
+    entrypoint: ["sh", "-c"]
+    command:
+      - mkdir -p /app/project/agent/skills
+        && cp -R /template/. /app/project/
+        && cp /skills/*.md /app/project/agent/skills/
+        && chown -R nao:nao /app/project
+    volumes:
+      - ./dev/nao-project:/template:ro
+      - ./nao/skills:/skills:ro
+      - nao-project:/app/project
+    restart: "no"
+
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_USER: nao
+      POSTGRES_PASSWORD: nao
+      POSTGRES_DB: nao
+    volumes:
+      - nao-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nao -d nao"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  nao:
+    image: docker.io/getnao/nao:latest
+    depends_on:
+      nao-project:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      hudi-mcp:
+        condition: service_healthy
+    environment:
+      NAO_DEFAULT_PROJECT_PATH: /app/project
+      NAO_CONTEXT_SOURCE: local
+      DB_URI: postgres://nao:nao@postgres:5432/nao
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-local-dev-only-change-me-0123456789}
+      BETTER_AUTH_URL: http://localhost:5005
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Amazon Bedrock (see dev/.env.example). Only nao gets these; empty values are ignored by nao.
+      AWS_REGION: ${BEDROCK_AWS_REGION:-us-east-1}
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      AWS_ACCESS_KEY_ID: ${BEDROCK_AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${BEDROCK_AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${BEDROCK_AWS_SESSION_TOKEN:-}
+      AWS_PROFILE: ${BEDROCK_AWS_PROFILE:-}
+    ports:
+      - "5005:5005"
+    volumes:
+      - nao-project:/app/project
+      # For BEDROCK_AWS_PROFILE: your AWS config and SSO cache (nao runs as the `nao` user).
+      # - ${HOME}/.aws:/home/nao/.aws
+    restart: unless-stopped
+
+volumes:
+  rustfs-data:
+  nao-project:
+  nao-postgres:

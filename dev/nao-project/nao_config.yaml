@@ -1,0 +1,3 @@
+# Minimal nao project for testing the hudi-mcp server. No databases: all data comes through the MCP server.
+# The LLM is picked from ANTHROPIC_API_KEY / OPENAI_API_KEY (or set it in nao's Settings).
+project_name: s3-lake-test

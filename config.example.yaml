@@ -1,0 +1,68 @@
+# hudi-mcp configuration. Point the server at it with HUDI_MCP_CONFIG=/path/to/config.yaml
+# (or --config). ${VAR} / ${VAR:-default} placeholders are filled from the environment.
+
+# Applied to every table unless the table overrides them.
+defaults:
+  # object_store-style keys, used for every format. Leave credentials out to use the default AWS chain:
+  # AWS_* env vars, IAM instance role, ECS task role or EKS IRSA (and ~/.aws profiles / SSO for
+  # Delta, Parquet, CSV and JSON tables, which DuckDB reads).
+  storage_options:
+    aws_region: ${AWS_REGION:-us-east-1}
+    # aws_access_key_id: ${AWS_ACCESS_KEY_ID}
+    # aws_secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+    # aws_session_token: ${AWS_SESSION_TOKEN}
+    # S3-compatible stores (MinIO, Ceph, R2...):
+    # aws_endpoint: http://minio.internal:9000
+    # aws_allow_http: true
+  hudi_options: {}
+    # Example: read MOR tables from base files only (faster, may miss un-compacted updates)
+    # hoodie.read.use.read_optimized.mode: true
+
+# Explicit tables: give them friendly SQL names and descriptions the agent will see.
+# format: hudi | delta | parquet | csv | json. Leave it out to detect it from the storage layout
+# (.hoodie/ -> hudi, _delta_log/ -> delta, otherwise the data files' extension).
+tables:
+  - name: trips
+    uri: s3://my-data-lake/warehouse/trips
+    description: One row per ride. Partitioned by city. Upserted every 15 minutes.
+  - name: payments
+    uri: s3://my-data-lake/warehouse/payments
+    description: Card payments, partitioned by dt (YYYY-MM-DD).
+    storage_options:
+      aws_region: eu-west-1   # per-table override
+  - name: customers
+    uri: s3://my-data-lake/delta/customers      # Delta Lake table (folder with _delta_log/)
+    format: delta
+  - name: page_views
+    uri: s3://my-data-lake/exports/page_views   # folder of Parquet files, hive partitions (dt=...) become columns
+  - name: fx_rates
+    uri: s3://my-data-lake/reference/fx_rates.csv
+    read_options:                              # passed to DuckDB's read_csv / read_json / read_parquet
+      delim: ";"
+      header: true
+  - name: app_events
+    uri: s3://my-data-lake/raw/events/2026-*/*.json.gz   # globs work too
+    format: json
+
+# Auto-discovery: folders under the prefix become tables named after the folder (lower-cased,
+# non-alphanumerics -> "_"): Hudi (.hoodie/hoodie.properties), Delta (_delta_log/), and folders of
+# .parquet / .csv / .json files (directly or under key=value partition folders).
+discover:
+  - prefix: s3://my-data-lake/warehouse
+    max_depth: 2          # folder levels below the prefix to search
+    name_prefix: ""       # e.g. "raw_" to namespace discovered tables
+    # formats: [hudi, delta]   # which kinds of tables to pick up (default: all)
+
+# Guardrails for what the agent can pull back.
+limits:
+  max_result_rows: 500     # rows returned per tool call
+  max_scan_rows: 5000000   # Hudi rows read into memory per table (queries, time travel, incremental)
+  max_cell_chars: 2000     # long strings / binary are truncated in results
+  preview_rows: 10
+  query_timeout_seconds: 300
+
+# DuckDB runs all SQL. Optional tuning:
+duckdb:
+  # memory_limit: 4GB       # default: 80% of RAM
+  # threads: 4              # default: all cores
+  # extension_directory: /opt/hudi-mcp/duckdb_extensions   # where httpfs / aws / delta are installed

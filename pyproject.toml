@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hudi-mcp"
+version = "0.2.0"
+description = "MCP server that lets AI agents (nao, Claude, Cursor...) query Hudi, Delta, Parquet, CSV and JSON tables in S3"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "hudi>=0.5,<0.6",        # hudi-rs Python bindings (API changed in 0.5: HudiReadOptions / read / read_stream)
+    "duckdb>=1.5,<2",        # SQL engine; reads Delta / Parquet / CSV / JSON (extensions: httpfs, aws, delta)
+    "pyarrow>=17",
+    "mcp>=2,<3",             # MCP Python SDK v2 (MCPServer)
+    "pyyaml>=6",
+    "sqlglot>=25",           # SQL analysis for column / filter pushdown into hudi-rs reads
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "moto[server]>=5", "boto3", "deltalake>=1"]
+
+[project.scripts]
+hudi-mcp = "hudi_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hudi_mcp"]

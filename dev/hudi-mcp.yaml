@@ -1,0 +1,94 @@
+# hudi-mcp config for the local docker-compose stack.
+#
+# Two kinds of storage:
+#   * RustFS (http://rustfs:9000, bucket "lake"): the seeded sample tables. Each one carries the RustFS settings
+#     through the &rustfs block below.
+#   * AWS S3: anything else, using `defaults`. Credentials come from LAKE_AWS_* in .env; leave them empty and
+#     no AWS table works (the RustFS ones still do).
+#
+# Apply changes with: docker compose restart hudi-mcp
+
+x-rustfs: &rustfs  # not read by the server; a YAML anchor reused below
+  aws_endpoint: http://rustfs:9000
+  aws_allow_http: true
+  aws_region: us-east-1
+  aws_access_key_id: ${RUSTFS_ACCESS_KEY}
+  aws_secret_access_key: ${RUSTFS_SECRET_KEY}
+  aws_session_token: ""   # never send an AWS session token from the defaults to RustFS
+
+defaults:
+  storage_options:  # AWS S3. Empty values count as unset.
+    aws_region: ${LAKE_AWS_REGION:-us-east-1}
+    aws_access_key_id: ${LAKE_AWS_ACCESS_KEY_ID:-}
+    aws_secret_access_key: ${LAKE_AWS_SECRET_ACCESS_KEY:-}
+    aws_session_token: ${LAKE_AWS_SESSION_TOKEN:-}
+
+tables:
+  # ---------- seeded sample tables in RustFS (formats are detected from the layout) ----------
+  - name: txns
+    uri: s3://lake/warehouse/hudi/v9_txns_simple_meta
+    description: Card transactions (Hudi copy-on-write), partitioned by region. 12 commits, useful for time travel.
+    storage_options: *rustfs
+  - name: trips
+    uri: s3://lake/warehouse/hudi/v6_trips_8i3d
+    description: Ride-hailing trips (Hudi merge-on-read), partitioned by city. 8 inserts, then 3 deletes.
+    storage_options: *rustfs
+  - name: customers
+    uri: s3://lake/warehouse/delta/customers
+    description: One row per customer (Delta Lake), partitioned by region. segment is consumer / smb / enterprise.
+    storage_options: *rustfs
+  - name: orders
+    uri: s3://lake/warehouse/parquet/orders
+    description: Orders for September 2026 (Parquet), partitioned by dt. amount is in the order's currency.
+    storage_options: *rustfs
+  - name: fx_rates
+    uri: s3://lake/warehouse/csv/fx_rates.csv
+    description: Conversion rate to USD per currency (CSV). Join orders on currency.
+    storage_options: *rustfs
+  - name: events
+    uri: s3://lake/warehouse/json/events
+    description: Web/app events (JSON) with a nested context struct (device, page).
+    storage_options: *rustfs
+
+  # ---------- examples: tables in AWS S3 (uncomment and adapt) ----------
+  # A Hudi, Delta or Parquet/CSV/JSON folder; the format is detected. Uses `defaults` (LAKE_AWS_* credentials).
+  # - name: sales
+  #   uri: s3://my-company-lake/warehouse/sales
+  #   description: One row per sale, partitioned by sale_date.
+  #
+  # Explicit format, and a glob over many files.
+  # - name: clickstream
+  #   uri: s3://my-company-raw/clickstream/2026-*/*.json.gz
+  #   format: json
+  #
+  # A single CSV file with reader options.
+  # - name: cost_centers
+  #   uri: s3://my-company-reference/finance/cost_centers.csv
+  #   read_options: {delim: ";", header: true}
+  #
+  # A bucket in another region and AWS account, with its own credentials.
+  # Add EU_AWS_ACCESS_KEY_ID / EU_AWS_SECRET_ACCESS_KEY to .env and to the hudi-mcp environment in docker-compose.yml.
+  # - name: eu_invoices
+  #   uri: s3://my-eu-bucket/delta/invoices
+  #   format: delta
+  #   storage_options:
+  #     aws_region: eu-west-1
+  #     aws_access_key_id: ${EU_AWS_ACCESS_KEY_ID}
+  #     aws_secret_access_key: ${EU_AWS_SECRET_ACCESS_KEY}
+  #     aws_session_token: ""   # don't reuse LAKE_AWS_SESSION_TOKEN with these keys
+
+# Other Hudi / Delta tables under the RustFS warehouse are picked up too (e.g. the v8_simplekeygen_nonhivestyle
+# Hudi table). Plain-file folders are left out: fx_rates is configured as a single file, and discovering its
+# folder would list the same data again as a table called "csv".
+discover:
+  - prefix: s3://lake/warehouse
+    max_depth: 2
+    formats: [hudi, delta]
+    storage_options: *rustfs
+  # Every table under an AWS prefix (uses `defaults`):
+  # - prefix: s3://my-company-lake/warehouse
+  #   max_depth: 2
+  #   name_prefix: aws_      # avoid name clashes with the sample tables
+
+duckdb:
+  memory_limit: 2GB
